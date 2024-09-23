@@ -1,0 +1,277 @@
+---
+title: "Tracks and Paycheck: An Analysis on Median Household Income and Transit in D.C."
+author: "Jack Chen"
+date: "2024-09-21"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+---
+
+# Introduction
+
+For many of us, public transportation has become such a crucial part of our daily lives, whether for commuting to work, running errands, or exploring our cities. It provides an affordable and eco-friendly alternative to driving, allowing people from many backgrounds to navigate the world around us. However, despite the option of public transport being available, access to such reliable and convenient public transit can vary greatly depending on one's neighborhood and socioeconomic status. In this analysis, we will examine how possibly correlations between household income levels correlate with the use and accessibility of public transportation systems in D.C., and observe any patterns that may be present
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r install_libraries_if_necessary, include=FALSE, eval=FALSE}
+install.packages("tidyverse", "tidycensus", "sf", "kableExtra", "mapview")
+```
+
+```{r setup_packages, include = FALSE, warning = FALSE, message = FALSE}
+# Load Libraries
+
+library(tidyverse)
+library(tidycensus)
+library(sf)
+library(kableExtra)
+library(mapview)
+
+options(scipen=999)
+options(tigris_class = "sf")
+
+source("https://raw.githubusercontent.com/urbanSpatial/Public-Policy-Analytics-Landing/master/functions.r")
+```
+
+```{r load_key, include = FALSE, warning = FALSE, eval = FALSE}
+census_api_key("0e028dfcee38f844e89c39d01870f6a964f675a2", overwrite = TRUE)
+```
+
+```{r load_acs_variables, include = FALSE, eval=FALSE}
+acs_variable_list.2022 = load_variables(2022, #year
+                                         "acs5", #five year ACS estimates
+                                         cache = TRUE)
+acs_variable_list.2012 = load_variables(2012, #year
+                                         "acs5", #five year ACS estimates
+                                         cache = TRUE)
+```
+
+```{r Variable list, include=FALSE}
+acs_varlist = c("B02001_001E","B19013_001E", 
+                        "B25058_001E")
+
+```
+
+```{r widen_2012, message=FALSE, warning=FALSE, results='hide'}
+dctract12.adj = 
+  get_acs(geography = "tract",
+          variables = acs_varlist, 
+          year=2012, state=11,
+          geometry=TRUE) %>% 
+  st_transform('EPSG:2248') %>%
+  dplyr::select(-NAME, -moe) %>%
+  spread(key = variable, value = estimate) %>%
+  rename(totPop = B02001_001,
+          medHHIncome = B19013_001) %>%
+mutate(year = "2012")
+```
+
+# Load and Wrangle 2022 ACS Data for D.C.
+
+```{r widen_2022, message=FALSE, warning=FALSE, results='hide'}
+dctract22.adj = 
+  get_acs(geography = "tract",
+          variables = acs_varlist, 
+          year=2022, state=11,
+          geometry=TRUE) %>% 
+  st_transform('EPSG:2248') %>%
+  dplyr::select( -NAME, -moe) %>%
+  spread(key = variable, value = estimate) %>%
+  rename(totPop = B02001_001,
+          medHHIncome = B19013_001) %>%
+  mutate(year = "2022")
+```
+
+```{r Obtaining Transit Data for DC, message=FALSE, warning=FALSE, results='hide'}
+dc_transit = st_read("https://maps2.dcgis.dc.gov/dcgis/rest/services/DCGIS_DATA/Transportation_Rail_Bus_WebMercator/MapServer/51/query?outFields=*&where=1%3D1&f=geojson") %>%
+  st_transform("EPSG:2248")
+```
+
+```{r Clipping Stations ONLY in DC, message=FALSE, warning=FALSE, results='hide'}
+dc_station = st_intersection(dc_transit, dctract12.adj)
+transitbuffer = st_buffer(dc_station, 2640) %>% st_sf()
+bufferunion = st_union(transitbuffer)
+
+dcBuffers = 
+  rbind(
+     transitbuffer %>%
+      mutate(Legend = "Buffer") %>%
+      dplyr::select(Legend),
+     bufferunion %>%
+      st_sf() %>%
+      mutate(Legend = "Unioned Buffer"))
+
+dcBufferUnion <- filter(dcBuffers, Legend=="Unioned Buffer")
+```
+
+```{r Combine ACS, message=FALSE, warning=FALSE, results='hide'}
+allTracts = rbind(dctract12.adj, dctract22.adj)
+
+allTracts.adj = 
+  rbind(
+    st_centroid(allTracts)[bufferunion,] %>%
+      st_drop_geometry() %>%
+      left_join(allTracts) %>%
+      st_sf() %>%
+      mutate(TOD = "TOD"),
+    st_centroid(allTracts)[bufferunion, op = st_disjoint] %>%
+      st_drop_geometry() %>%
+      left_join(allTracts) %>%
+      st_sf() %>%
+      mutate(TOD = "Not TOD")) %>%
+  mutate(medHHIncome.adj = ifelse(year == "2012", medHHIncome * 1.27, medHHIncome)) 
+```
+
+# Analysis
+
+When looking at the median household income per tract within D.C. and its relationship with the half mile buffers of the transit stations in the city,
+
+```{r median household income, message=FALSE, warning=FALSE, fig.width=9, fig.height=8}
+allTracts.adj %>% 
+  ggplot()+
+  geom_sf(aes(fill=medHHIncome.adj), color="grey") +
+  scale_fill_continuous(low = "white", high = "#88cc00", name= "Median Household Income (Adjusted to 2022 dollar value)")+
+  facet_wrap(~year) +
+  geom_sf(data=bufferunion, color = "#1400f0", fill = "transparent", linewidth = 0.75) +
+  theme(legend.position = "top",
+        plot.title = element_text(size = 12, face = "bold"),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "white", fill=NA, size=0.8),
+        axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.ticks.y=element_blank(),
+        ) + 
+  labs(title = "Median Household Income per tract \nwithin Washington, D.C.",
+       caption = "0.5 mile buffer of transit stops represented via blue circles. \n \n Data from American Community Survey 2012 and 2022 \n and WMATA 2024") 
+```
+
+*Figure 6 - Plot of Median Household Income of each census tracts in D.C. with half mile buffers of each station*
+
+Figure 6 reveals a distinct pattern in D.C.'s income distribution, where we can see that higher median household incomes predominantly cluster in the Northwest, while lower incomes are more prevalent in the Southeast, and this trend is consistent across both 2012 and 2022 data sets. Despite the consistent pattern, we can still observe an increase in central D.C.‘s median income over the decade. While not directly The data also indicates a correlation between income levels and transit station density, with middle to high-income tracts generally boasting more transit stations. This relationship could be attributed to two potential factors: affluent residents gravitating towards areas with better transit infrastructure, or the city has chosen to build the infrastructure near those areas.
+
+```{r summary table, message=FALSE, warning=FALSE}
+allTracts.Summary = 
+  st_drop_geometry(allTracts.adj) %>%
+  group_by(year, TOD) %>%
+  summarize(Median_Income = mean(medHHIncome.adj, na.rm = T))
+
+kable(allTracts.Summary) %>%
+  kable_styling() %>%
+  row_spec(1, color = "black", background = "#57c1ff") %>% 
+  row_spec(2, color = "black", background = "#ffbe57") %>% 
+  row_spec(3, color = "black", background = "#57c1ff") %>% 
+  row_spec(4, color = "black", background = "#ffbe57") 
+```
+
+Table 1 - Table of Median Household Income Across Space and Time
+
+```{r bar plots, message=FALSE, warning=FALSE, fig.width=11, fig.height=4.5}
+allTracts.Summary %>%
+  gather(Variable, Value, -year, -TOD) %>%
+  ggplot(aes(year, Value, fill = TOD)) +
+  geom_bar(stat = "identity", position = "dodge", width=0.75) +
+  facet_wrap(~Variable, scales = "free") +
+  scale_fill_manual(values = c("#ffbe57", "#57c1ff")) +  
+  labs(title = "Median Household Income Across Time and Space",
+       caption = "Data: American Community Survey 2012 and 2022") +
+  coord_flip() +
+  guides(fill=guide_legend(title="Is in TOD?"))
+  theme(legend.position = "bottom",
+        #axis.ticks.x=element_blank(),
+        #axis.ticks.y=element_blank(),
+        plot.title = element_text(size = 12, face = "bold"),
+        panel.background = element_blank(),
+        panel.grid.major.x = element_line(colour = "#e2e2e2"),
+        panel.border = element_rect(colour = "white", fill=NA, size=0.8))
+        #panel.border = element_rect(colour = "grey", fill=NA, size=0.8)) 
+```
+
+*Figure 2 - Bar Plot of Median Household Income Across Space and Time in D.C.*
+
+In both table 1 and figure 2, we are able to see the indicators and their change across TOD and non-TOD areas as well as over the years. First of all, we can see an increase in the median household income regardless of TOD and non-TOD areas, and that typically TOD areas tend to be contain a a higher median household income. This result seems to show that people with higher median household income would prefer to live in TOD locations.
+
+```{r graduated population, message=FALSE, warning=FALSE, fig.width = 9, fig.height = 9}
+dc_station$ID = seq_along(dc_station$NAME)
+
+dc_station.att = st_sf(st_buffer(dc_station, 2640)) %>%
+  st_intersection(st_centroid(dctract22.adj)) %>%
+  st_drop_geometry() %>%
+  group_by(ID) %>%
+  summarize(
+    median_household = mean(medHHIncome, na.rm = T))
+
+sf.dc.station = dc_station %>%
+  left_join(dc_station.att, by = "ID") %>%
+  mutate(longitude = st_coordinates(.)[,1],
+         latitude = st_coordinates(.)[,2]) %>%
+  st_transform('EPSG:2248') 
+
+ggplot() +
+  geom_sf(data = allTracts.adj, fill = '#f2f2f2', color = 'transparent') +
+  geom_point(data = sf.dc.station, aes(x = longitude, y = latitude, size = median_household), color = "red", alpha = 0.3) +
+  scale_size(range = c(1, 15), name = "Median Household Income") +
+  labs(title = "Graduated Symbol Map for Median Household Income",
+       caption = "Median Household Income within 0.5 miles of transit stations") +
+  theme(plot.title = element_text(size = 12, face = "bold"),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank(),
+        panel.background = element_blank())
+```
+
+*Figure 3 - Graduated Map of Median Household Income within Half-mile of Transit Stations*
+
+Figure 3 also corroborates what we have been seeing previously with central and Northwestern D.C. being areas with some of the highest median household income in the area, where it is also where a majority of the stations are clustered together, too.
+
+```{r mrb, message=FALSE, warning=FALSE, include=FALSE}
+mrb = multipleRingBuffer(st_union(dc_station), 26400, 2640)
+
+ggplot() +
+    geom_sf(data=mrb, aes(fill = distance), color = "#708090", alpha = 0.5) +
+    scale_fill_continuous(low = "#FAF9F6", high = "#595fff", name= "Distance")+
+    geom_sf(data=st_union(dctract12.adj), fill= "transparent", color = "black", size = 2) +
+    geom_sf(data=dc_station, color = "#fd7f6f", size= 0.8) +    
+    labs(title="Half Mile Buffers",
+         subtitle = "Distance in-between each buffer is 0.5 mile",
+         caption = "Data from American Community Survey 2012 and 2022 \nand WMATA 2024") +
+    theme(plot.title = element_text(size = 12, face = "bold"),
+          axis.text.x=element_blank(),
+          axis.ticks.x=element_blank(),
+          axis.text.y=element_blank(),
+          axis.ticks.y=element_blank(),
+        panel.background = element_blank(),
+        plot.subtitle = element_text(size = 9,face = "italic"))
+```
+
+```{r join income and distance, message=FALSE, warning=FALSE}
+incomeDist = st_join(mrb, allTracts.adj, join = st_intersects) %>%
+  group_by(distance, year) %>%
+  summarize(median_household = mean(medHHIncome, na.rm = TRUE))
+```
+
+```{r rent distance, message=FALSE, warning=FALSE, fig.width = 8, fig.height = 5}
+ggplot(incomeDist, aes(x = distance, y = median_household)) +
+  geom_line(aes(color = year), linewidth = 3) +
+  labs(title = "Median Household Income as a Function of Distance to Transit Stations in D.C.",
+       x = "Distance from D.C. Transit Stations (ft)",
+       y = "Median Household Income ($)",
+       caption = "Data from American Community Survey 2012 and 2022 \nand WMATA 2024") +
+  theme_minimal()
+```
+
+*Figure 4 - Plot of Median Household Income as a Function of Distance from Transit Stations.*
+
+While we previously saw that median household income should be highest near transit station, we observe here in figure 4 that while median household income is quite high, it is not the highest.It is clear that between the 2 mile and 4 mile distances, there is a large peak in median household income, which represents that the distance and median household income are not linearly correlated.
+
+# Conclusion
+
+Overall, our analysis explored the relationship between median household income and transit-oriented development practices in Washington D.C. for the years 2012 and 2022. While we uncovered various insights, the correlation between these factors is not straightforward.
+
+This analysis suggests a complex relationship between income levels and proximity to transit stations. Higher-income families may have the option to reside near transit hubs, which are often in densely populated areas. However, not all affluent households choose this lifestyle. In fact, the wealthiest families might opt for less congested areas, relying on private vehicles rather than public transportation.
+
+To gain a more comprehensive understanding of this relationship, further research is necessary. Future studies should consider additional variables that may influence the connection between income and transit accessibility. Ultimately, this analysis serves as a starting point for deeper investigations into urban planning, socioeconomic patterns, and public transportation utilization in the nation's capital.
